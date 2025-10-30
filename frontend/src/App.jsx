@@ -296,13 +296,13 @@ function App() {
               <h1 style={{
                 fontSize: '24px',
                 fontWeight: '700',
-                color: 'white',
+                color: '#0f172a',
                 margin: 0,
                 letterSpacing: '-0.02em'
               }}>Ambience AI</h1>
               <p style={{
                 fontSize: '13px',
-                color: 'rgba(255, 255, 255, 0.8)',
+                color: '#64748b',
                 margin: 0,
                 fontWeight: '500'
               }}>Medical Documentation</p>
@@ -322,23 +322,23 @@ function App() {
               fontSize: '15px',
               border: 'none',
               cursor: (isConnecting || isProcessing) ? 'not-allowed' : 'pointer',
-              backgroundColor: session ? '#dc2626' : (isConnecting || isProcessing) ? '#cbd5e1' : '#5E9C84',
+              backgroundColor: session ? '#dc2626' : (isConnecting || isProcessing) ? '#cbd5e1' : '#364A7D',
               color: 'white',
               transition: 'all 0.2s',
               marginBottom: '12px',
-              boxShadow: (isConnecting || isProcessing) ? 'none' : '0 2px 8px rgba(94, 156, 132, 0.4)'
+              boxShadow: (isConnecting || isProcessing) ? 'none' : '0 2px 8px rgba(54, 74, 125, 0.3)'
             }}
             onMouseOver={(e) => {
               if (!isConnecting && !isProcessing) {
-                e.target.style.backgroundColor = session ? '#b91c1c' : '#497F86';
+                e.target.style.backgroundColor = session ? '#b91c1c' : '#524286';
                 e.target.style.transform = 'translateY(-1px)';
-                e.target.style.boxShadow = session ? '0 4px 12px rgba(220, 38, 38, 0.4)' : '0 4px 12px rgba(73, 127, 134, 0.5)';
+                e.target.style.boxShadow = session ? '0 4px 12px rgba(220, 38, 38, 0.4)' : '0 4px 12px rgba(82, 66, 134, 0.4)';
               }
             }}
             onMouseOut={(e) => {
-              e.target.style.backgroundColor = session ? '#dc2626' : (isConnecting || isProcessing) ? '#cbd5e1' : '#5E9C84';
+              e.target.style.backgroundColor = session ? '#dc2626' : (isConnecting || isProcessing) ? '#cbd5e1' : '#364A7D';
               e.target.style.transform = 'translateY(0)';
-              e.target.style.boxShadow = (isConnecting || isProcessing) ? 'none' : '0 2px 8px rgba(94, 156, 132, 0.4)';
+              e.target.style.boxShadow = (isConnecting || isProcessing) ? 'none' : '0 2px 8px rgba(54, 74, 125, 0.3)';
             }}
           >
             {isProcessing ? 'Processing Report...' : isConnecting ? 'Connecting...' : session ? 'End Consultation' : 'Start Consultation'}
@@ -353,18 +353,18 @@ function App() {
                 borderRadius: '10px',
                 fontWeight: '600',
                 fontSize: '14px',
-                border: '2px solid white',
+                border: '2px solid #364A7D',
                 cursor: 'pointer',
-                backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                color: 'white',
+                backgroundColor: 'white',
+                color: '#364A7D',
                 transition: 'all 0.2s',
                 marginBottom: '12px'
               }}
               onMouseOver={(e) => {
-                e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.2)';
+                e.target.style.backgroundColor = '#f0f9ff';
               }}
               onMouseOut={(e) => {
-                e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+                e.target.style.backgroundColor = 'white';
               }}
             >
               {isPaused ? 'Resume Recording' : 'Pause Recording'}
@@ -380,20 +380,20 @@ function App() {
                 borderRadius: '10px',
                 fontWeight: '600',
                 fontSize: '14px',
-                border: '2px solid rgba(255, 255, 255, 0.3)',
+                border: '2px solid #e2e8f0',
                 cursor: 'pointer',
-                backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                color: 'white',
+                backgroundColor: 'white',
+                color: '#475569',
                 transition: 'all 0.2s',
                 marginBottom: '12px'
               }}
               onMouseOver={(e) => {
-                e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.15)';
-                e.target.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+                e.target.style.backgroundColor = '#f8fafc';
+                e.target.style.borderColor = '#cbd5e1';
               }}
               onMouseOut={(e) => {
-                e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
-                e.target.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+                e.target.style.backgroundColor = 'white';
+                e.target.style.borderColor = '#e2e8f0';
               }}
             >
               New Consultation
@@ -468,17 +468,17 @@ function App() {
                   borderRadius: '10px',
                   fontWeight: '600',
                   fontSize: '14px',
-                  border: '2px solid white',
+                  border: '2px solid #364A7D',
                   cursor: 'pointer',
-                  backgroundColor: 'rgba(255, 255, 255, 0.15)',
-                  color: 'white',
+                  backgroundColor: 'white',
+                  color: '#364A7D',
                   transition: 'all 0.2s'
                 }}
                 onMouseOver={(e) => {
-                  e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.25)';
+                  e.target.style.backgroundColor = '#f0f9ff';
                 }}
                 onMouseOut={(e) => {
-                  e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.15)';
+                  e.target.style.backgroundColor = 'white';
                 }}
               >
                 Download TXT
@@ -489,13 +489,13 @@ function App() {
           <div style={{
             marginTop: '24px',
             padding: '18px',
-            backgroundColor: 'rgba(255, 255, 255, 0.1)',
+            backgroundColor: '#f8fafc',
             borderRadius: '12px',
-            border: '1px solid rgba(255, 255, 255, 0.2)'
+            border: '1px solid #e2e8f0'
           }}>
             <h3 style={{
               fontWeight: '600',
-              color: 'white',
+              color: '#334155',
               margin: '0 0 14px 0',
               fontSize: '13px',
               textTransform: 'uppercase',
@@ -510,18 +510,18 @@ function App() {
                 boxShadow: (session || isProcessing) ? '0 0 12px currentColor' : 'none',
                 animation: (session && !isPaused) || isProcessing ? 'pulse 2s infinite' : 'none'
               }} />
-              <span style={{ color: 'rgba(255, 255, 255, 0.9)', fontSize: '14px', fontWeight: '500' }}>
+              <span style={{ color: '#475569', fontSize: '14px', fontWeight: '500' }}>
                 {isProcessing ? 'Generating Report...' : session ? (isPaused ? 'Paused' : 'Recording...') : 'Ready'}
               </span>
             </div>
             {session && (
               <div style={{
-                color: 'rgba(255, 255, 255, 0.8)',
+                color: '#64748b',
                 fontSize: '12px',
                 padding: '8px 12px',
-                backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                backgroundColor: 'white',
                 borderRadius: '6px',
-                border: '1px solid rgba(255, 255, 255, 0.2)'
+                border: '1px solid #e2e8f0'
               }}>
                 <strong>Session:</strong> #{session.id}
               </div>
@@ -531,10 +531,10 @@ function App() {
 
         <div style={{
           padding: '16px 24px',
-          borderTop: '1px solid rgba(255, 255, 255, 0.2)',
-          backgroundColor: 'rgba(0, 0, 0, 0.1)',
+          borderTop: '1px solid #e2e8f0',
+          backgroundColor: '#f8fafc',
           fontSize: '11px',
-          color: 'rgba(255, 255, 255, 0.7)',
+          color: '#94a3b8',
           textAlign: 'center'
         }}>
           HIPAA Compliant • Secure Recording
@@ -546,12 +546,12 @@ function App() {
         flex: 1,
         display: 'flex',
         flexDirection: 'column',
-        background: 'linear-gradient(180deg, #364A7D 0%, #497F86 100%)'
+        backgroundColor: 'white'
       }}>
         <div style={{
-          backgroundColor: 'rgba(255, 255, 255, 0.95)',
+          backgroundColor: 'white',
           boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.2)',
+          borderBottom: '1px solid #e2e8f0',
           padding: '20px 32px',
           display: 'flex',
           alignItems: 'center',
@@ -579,7 +579,7 @@ function App() {
           flex: 1,
           overflowY: 'auto',
           padding: '40px',
-          backgroundColor: 'rgba(255, 255, 255, 0.05)'
+          backgroundColor: '#fafbfc'
         }}>
           {medicalReport ? (
             <div style={{

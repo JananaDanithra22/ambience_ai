@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from scipy.io.wavfile import write as wav_write
+from scipy import signal
 from groq import Groq
 import logging
 
@@ -52,11 +53,7 @@ async def health():
 
 @app.post('/api/orders')
 async def create_order(request: Request):
-    """Receive a conversation/order from the frontend and persist it in-memory (and on-disk).
-
-    Expected JSON: { session_id: <int>, transcript: <str>, summary: <str> }
-    Returns: { order_id }
-    """
+    """Receive a conversation/order from the frontend and persist it in-memory (and on-disk)."""
     global _NEXT_ORDER_ID
     payload = await request.json()
     print(f"[RECEIVED] Order payload: keys={list(payload.keys())}")
@@ -73,7 +70,6 @@ async def create_order(request: Request):
         os.makedirs("orders", exist_ok=True)
         with open(os.path.join("orders", f"order-{_NEXT_ORDER_ID}.json"), "w", encoding="utf-8") as f:
             import json
-
             json.dump(order, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("[WARNING] Failed to write order to disk:", e)
@@ -173,6 +169,52 @@ If information is not mentioned in the conversation, use "Not provided" or "Not 
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+def preprocess_audio(audio_data, sample_rate):
+    """Lightweight audio preprocessing for better transcription."""
+    # Convert to float for processing
+    audio_float = audio_data.astype(np.float32)
+    
+    # Normalize audio to -1 to 1 range
+    max_val = np.abs(audio_float).max()
+    if max_val > 0:
+        audio_float = audio_float / max_val
+    
+    # Apply gentle high-pass filter to remove rumble (below 80 Hz)
+    sos = signal.butter(2, 80, btype='highpass', fs=sample_rate, output='sos')
+    audio_float = signal.sosfilt(sos, audio_float)
+    
+    # Apply low-pass filter to remove high-frequency noise
+    # Must be less than Nyquist frequency (sample_rate / 2)
+    nyquist = sample_rate / 2
+    cutoff = min(7500, nyquist * 0.95)  # 7500 Hz or 95% of Nyquist, whichever is lower
+    sos = signal.butter(2, cutoff, btype='lowpass', fs=sample_rate, output='sos')
+    audio_float = signal.sosfilt(sos, audio_float)
+    
+    # Normalize again after filtering
+    max_val = np.abs(audio_float).max()
+    if max_val > 0:
+        audio_float = audio_float / max_val
+    
+    # Convert back to int16 with proper scaling
+    audio_int16 = (audio_float * 32767 * 0.9).astype(np.int16)
+    
+    return audio_int16
+
+
+def resample_audio(audio, original_rate, target_rate):
+    """High-quality audio resampling using scipy's resample."""
+    if original_rate == target_rate:
+        return audio
+    
+    # Calculate the number of samples in the resampled audio
+    num_samples = int(len(audio) * target_rate / original_rate)
+    
+    # Use scipy's resample for high-quality resampling
+    resampled = signal.resample(audio, num_samples)
+    
+    return resampled.astype(np.int16)
+
+
 @app.post("/api/webrtc/offer")
 async def webrtc_offer(request: Request):
     params = await request.json()
@@ -214,7 +256,6 @@ async def webrtc_offer(request: Request):
         @channel.on("open")
         def on_open():
             print(f"[OPEN] Data channel '{channel.label}' is now OPEN")
-            # Send a test message to verify connection
             try:
                 channel.send("System ready - start speaking!")
                 print("[SENT] Test message sent to client")
@@ -233,23 +274,27 @@ async def webrtc_offer(request: Request):
             return
 
         buffer = []
-        SAMPLE_RATE = 48000  # Higher sample rate for better quality
-        CHUNK_DURATION = 3  # Shorter chunks for more frequent transcription
-        MAX_SAMPLES = int(SAMPLE_RATE * CHUNK_DURATION)
+        TARGET_SAMPLE_RATE = 16000  # Optimal for Whisper
+        CHUNK_DURATION = 4  # Balanced: good accuracy + responsive
+        MAX_SAMPLES = int(TARGET_SAMPLE_RATE * CHUNK_DURATION)
         processing_lock = {"is_processing": False}
 
         async def transcribe_audio(chunk, session_data):
-            """Process transcription only - no summary"""
+            """Process transcription with improved audio quality."""
             try:
+                print("[PREPROCESSING] Starting audio preprocessing...")
+                # Preprocess audio for better quality
+                processed_audio = preprocess_audio(chunk, TARGET_SAMPLE_RATE)
+                
                 # Save chunk as WAV
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     wav_path = f.name
-                    wav_write(wav_path, SAMPLE_RATE, chunk)
-                    print(f"[SAVED] Audio saved to: {wav_path}")
+                    wav_write(wav_path, TARGET_SAMPLE_RATE, processed_audio)
+                    print(f"[SAVED] Audio saved: {len(processed_audio)/TARGET_SAMPLE_RATE:.2f}s")
 
                 # Transcribe with Groq Whisper
                 if client is None:
-                    print("[ERROR] Groq client not initialized; skipping transcription")
+                    print("[ERROR] Groq client not initialized")
                     try:
                         os.unlink(wav_path)
                     except:
@@ -264,29 +309,38 @@ async def webrtc_offer(request: Request):
                         return client.audio.transcriptions.create(
                             file=(filename, file_bytes),
                             model="whisper-large-v3",
-                            temperature=0,
+                            language="en",
+                            temperature=0.0,
                             response_format="verbose_json",
                         )
                     except Exception:
                         raise
 
-                print("[TRANSCRIBING] Sending for transcription (background thread)...")
+                print("[TRANSCRIBING] Sending to Whisper API...")
+                start_time = time.time()
                 transcription_resp = await asyncio.to_thread(
                     do_transcription, audio_bytes, os.path.basename(wav_path)
                 )
+                elapsed = time.time() - start_time
+                print(f"[TRANSCRIPTION TIME] {elapsed:.2f}s")
 
                 # Get transcribed text
-                text = getattr(transcription_resp, "text", "")
-                print(f"[TRANSCRIBED] {text}")
-
-                if text.strip():  # Only process non-empty transcriptions
+                text = getattr(transcription_resp, "text", "").strip()
+                
+                if text:
+                    print(f"[TRANSCRIBED] '{text}'")
                     session_data["transcriptions"].append(text)
 
-                    # Send transcription to UI
+                    # Send raw transcription to UI immediately (no AI processing)
                     for dc in session_data["data_channels"]:
                         if dc.readyState == "open":
-                            dc.send(f"{text}")
-                            print(f"[SENT] Transcription to client: {text[:50]}...")
+                            try:
+                                dc.send(text)  # Send ONLY the raw transcribed text
+                                print(f"[✓ SENT TO UI] '{text}'")
+                            except Exception as send_err:
+                                print(f"[ERROR] Failed to send to UI: {send_err}")
+                else:
+                    print("[NO TEXT] Empty transcription result")
 
                 # Clean up temp file
                 try:
@@ -295,62 +349,38 @@ async def webrtc_offer(request: Request):
                     pass
 
             except Exception as e:
-                print(f"[ERROR] Error transcribing: {e}")
+                print(f"[ERROR] Transcription error: {e}")
                 import traceback
-
                 traceback.print_exc()
             finally:
                 processing_lock["is_processing"] = False
+                print("[UNLOCK] Processing lock released")
 
         async def process_audio():
             print("[AUDIO] Starting audio processing loop...")
             frame_count = 0
-            total_samples_received = 0
             try:
                 while True:
                     try:
-                        # Add timeout to prevent hanging
                         frame = await asyncio.wait_for(track.recv(), timeout=10.0)
                         frame_count += 1
 
-                        # Get frame info
                         frame_samples = frame.samples
                         frame_rate = frame.sample_rate
-                        total_samples_received += frame_samples
 
-                        print(
-                            f"[FRAME] #{frame_count}: {frame.format.name}, "
-                            f"rate={frame_rate}Hz, samples={frame_samples}, "
-                            f"duration={frame_samples / frame_rate:.3f}s, "
-                            f"total_received={total_samples_received}"
-                        )
+                        if frame_count % 50 == 0:  # Log every 50 frames to reduce spam
+                            print(f"[FRAME] #{frame_count}: {frame_rate}Hz, {frame_samples} samples")
 
-                        # Convert to numpy array - handle both mono and stereo
+                        # Convert to numpy array
                         pcm = frame.to_ndarray()
 
-                        # If multichannel, convert to mono by averaging channels robustly
+                        # Convert to mono if multichannel
                         if pcm.ndim > 1:
                             if pcm.shape[0] < pcm.shape[1]:
                                 pcm = pcm.mean(axis=0)
                             else:
                                 pcm = pcm.mean(axis=-1)
-                            pcm = pcm.astype(pcm.dtype)
-
-                        # Resample from frame rate to target SAMPLE_RATE if needed
-                        if frame_rate != SAMPLE_RATE:
-                            print(
-                                f"[RESAMPLE] From {frame_rate}Hz to {SAMPLE_RATE}Hz"
-                            )
-                            original_length = len(pcm)
-                            new_length = int(original_length * SAMPLE_RATE / frame_rate)
-                            x_old = np.linspace(0, 1, original_length)
-                            x_new = np.linspace(0, 1, new_length)
-                            pcm = np.interp(
-                                x_new, x_old, pcm.astype(np.float32)
-                            ).astype(np.int16)
-                            print(
-                                f"[RESAMPLED] After resampling: {len(pcm)} samples (from {original_length})"
-                            )
+                            pcm = pcm.astype(np.int16)
 
                         # Ensure int16 format
                         if pcm.dtype != np.int16:
@@ -359,45 +389,39 @@ async def webrtc_offer(request: Request):
                             else:
                                 pcm = pcm.astype(np.int16)
 
+                        # Resample to target rate
+                        if frame_rate != TARGET_SAMPLE_RATE:
+                            pcm = resample_audio(pcm, frame_rate, TARGET_SAMPLE_RATE)
+
                         buffer.append(pcm)
 
                         total_samples = sum(len(b) for b in buffer)
-                        progress = (total_samples / MAX_SAMPLES) * 100
-                        print(
-                            f"[BUFFER] {total_samples}/{MAX_SAMPLES} samples ({progress:.1f}%) - "
-                            f"{total_samples / SAMPLE_RATE:.2f}s audio"
-                        )
-
-                        if (
-                            total_samples >= MAX_SAMPLES
-                            and not processing_lock["is_processing"]
-                        ):
+                        
+                        if total_samples >= MAX_SAMPLES and not processing_lock["is_processing"]:
                             processing_lock["is_processing"] = True
-                            print(
-                                f"[PROCESSING] Buffer full! Processing {total_samples} samples ({total_samples / SAMPLE_RATE:.2f}s)"
-                            )
+                            duration = total_samples / TARGET_SAMPLE_RATE
+                            print(f"\n[BUFFER FULL] Processing {duration:.2f}s of audio")
+                            print(f"[LOCK] Processing lock acquired")
+                            
                             chunk = np.concatenate(buffer)
                             buffer.clear()
 
                             # Trim to exact size
                             chunk = chunk[:MAX_SAMPLES]
 
-                            # Process in background without blocking
-                            asyncio.create_task(
-                                transcribe_audio(chunk, session_data)
-                            )
+                            # Process in background
+                            asyncio.create_task(transcribe_audio(chunk, session_data))
 
                     except asyncio.TimeoutError:
-                        print("[TIMEOUT] No audio frame received (timeout)")
+                        print("[TIMEOUT] No audio frame (10s timeout)")
                         continue
                     except Exception as e:
-                        print(f"[ERROR] Error receiving frame: {e}")
+                        print(f"[ERROR] Frame error: {e}")
                         break
 
             except Exception as e:
-                print(f"[ERROR] Audio processing loop error: {e}")
+                print(f"[ERROR] Audio loop error: {e}")
                 import traceback
-
                 traceback.print_exc()
 
         # Start the audio processing task
@@ -418,5 +442,4 @@ async def webrtc_offer(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="127.0.0.1", port=8000)
