@@ -25,9 +25,9 @@ function App() {
     setMedicalReport(null);
     setIsPaused(false);
     try {
-      const res = await fetch("http://localhost:8000/api/session");
-      if (!res.ok) throw new Error("Failed to create session");
-      const data = await res.json();
+  const res = await fetch("http://localhost:8000/api/session")
+  if (!res.ok) throw new Error("Failed to create session");
+  const data = await res.json();
       if (!data?.session) throw new Error("Invalid session data");
       setSession(data.session);
       console.log("Session:", data.session);

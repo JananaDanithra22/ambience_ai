@@ -27,10 +27,17 @@ sessions = {}
 orders = {}
 _NEXT_ORDER_ID = 1
 
-# CORS for local React dev
+# CORS for local React dev (allow the frontend dev server ports)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:5176",
+        "http://127.0.0.1:5175",
+        "http://127.0.0.1:5176",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
