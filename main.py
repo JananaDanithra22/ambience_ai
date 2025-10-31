@@ -1,8 +1,11 @@
+# In main.py (FastAPI)
 import time
 import numpy as np
 import asyncio
 import tempfile
 import os
+import logging
+from voice_detection import detect_voice_activity
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -10,7 +13,6 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from scipy.io.wavfile import write as wav_write
 from scipy import signal
 from groq import Groq
-import logging
 
 # Initialize Groq client with API key directly
 try:
@@ -27,20 +29,14 @@ sessions = {}
 orders = {}
 _NEXT_ORDER_ID = 1
 
-# CORS for local React dev (allow the frontend dev server ports)
+# CORS for local React dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "http://localhost:5176",
-        "http://127.0.0.1:5175",
-        "http://127.0.0.1:5176",
-    ],
+    allow_origins=["*"],  # Allow all origins during development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 
@@ -177,7 +173,7 @@ If information is not mentioned in the conversation, use "Not provided" or "Not 
 
 
 def preprocess_audio(audio_data, sample_rate):
-    """Lightweight audio preprocessing for better transcription."""
+    """Enhanced audio preprocessing for better transcription accuracy."""
     # Convert to float for processing
     audio_float = audio_data.astype(np.float32)
     
@@ -186,16 +182,18 @@ def preprocess_audio(audio_data, sample_rate):
     if max_val > 0:
         audio_float = audio_float / max_val
     
-    # Apply gentle high-pass filter to remove rumble (below 80 Hz)
-    sos = signal.butter(2, 80, btype='highpass', fs=sample_rate, output='sos')
+    # Apply more aggressive high-pass filter to remove low frequency noise (below 100 Hz)
+    sos = signal.butter(4, 100, btype='highpass', fs=sample_rate, output='sos')
     audio_float = signal.sosfilt(sos, audio_float)
     
-    # Apply low-pass filter to remove high-frequency noise
-    # Must be less than Nyquist frequency (sample_rate / 2)
+    # Apply band-pass filter to focus on speech frequencies (300Hz - 3400Hz)
+    sos_speech = signal.butter(4, [300, 3400], btype='bandpass', fs=sample_rate, output='sos')
+    audio_float = signal.sosfilt(sos_speech, audio_float)
+    
+    # Additional noise reduction with a gentle low-pass filter
     nyquist = sample_rate / 2
-    cutoff = min(7500, nyquist * 0.95)  # 7500 Hz or 95% of Nyquist, whichever is lower
-    sos = signal.butter(2, cutoff, btype='lowpass', fs=sample_rate, output='sos')
-    audio_float = signal.sosfilt(sos, audio_float)
+    cutoff = min(4000, nyquist * 0.95)  # Focus more on speech frequencies
+    sos = signal.butter(4, cutoff, btype='lowpass', fs=sample_rate, output='sos')
     
     # Normalize again after filtering
     max_val = np.abs(audio_float).max()
@@ -264,10 +262,18 @@ async def webrtc_offer(request: Request):
         def on_open():
             print(f"[OPEN] Data channel '{channel.label}' is now OPEN")
             try:
-                channel.send("System ready - start speaking!")
-                print("[SENT] Test message sent to client")
+                channel.send("System initializing - checking audio input...")
+                print("[SENT] Initial status message to client")
+                # Send a quick follow-up message
+                async def send_ready_message():
+                    await asyncio.sleep(1.5)
+                    try:
+                        channel.send("Audio system ready - please start speaking...")
+                    except Exception:
+                        pass
+                asyncio.create_task(send_ready_message())
             except Exception as e:
-                print(f"[ERROR] Failed to send test message: {e}")
+                print(f"[ERROR] Failed to send status message: {e}")
 
         @channel.on("message")
         def on_message(msg):
@@ -281,10 +287,21 @@ async def webrtc_offer(request: Request):
             return
 
         buffer = []
+        secondary_buffer = []  # Buffer for continuous processing
         TARGET_SAMPLE_RATE = 16000  # Optimal for Whisper
-        CHUNK_DURATION = 4  # Balanced: good accuracy + responsive
+        CHUNK_DURATION = 1.0  # Reduced for faster processing
+        INITIAL_CHUNK_DURATION = 0.3  # Even shorter for initial detection
+        MIN_SILENCE_DURATION = 0.15  # Shorter silence threshold
         MAX_SAMPLES = int(TARGET_SAMPLE_RATE * CHUNK_DURATION)
+        INITIAL_MAX_SAMPLES = int(TARGET_SAMPLE_RATE * INITIAL_CHUNK_DURATION)
+        MIN_SILENCE_SAMPLES = int(TARGET_SAMPLE_RATE * MIN_SILENCE_DURATION)
+        OVERLAP_DURATION = 0.2  # Overlap between chunks to avoid word splitting
+        OVERLAP_SAMPLES = int(TARGET_SAMPLE_RATE * OVERLAP_DURATION)
         processing_lock = {"is_processing": False}
+        last_voice_activity = time.time()
+        initial_detection = {"completed": False}
+        continuous_silence_duration = 0
+        last_chunk_had_speech = False  # Track if the last chunk had speech
 
         async def transcribe_audio(chunk, session_data):
             """Process transcription with improved audio quality."""
@@ -298,6 +315,15 @@ async def webrtc_offer(request: Request):
                     wav_path = f.name
                     wav_write(wav_path, TARGET_SAMPLE_RATE, processed_audio)
                     print(f"[SAVED] Audio saved: {len(processed_audio)/TARGET_SAMPLE_RATE:.2f}s")
+
+                # Check for voice activity before transcribing
+                if not detect_voice_activity(processed_audio, TARGET_SAMPLE_RATE):
+                    print("[INFO] No voice activity detected, skipping transcription")
+                    try:
+                        os.unlink(wav_path)
+                    except:
+                        pass
+                    return
 
                 # Transcribe with Groq Whisper
                 if client is None:
@@ -319,6 +345,8 @@ async def webrtc_offer(request: Request):
                             language="en",
                             temperature=0.0,
                             response_format="verbose_json",
+                            word_timestamps=True,  # Enable word-level timestamps
+                            prompt="This is a medical consultation. Transcribe speech as it occurs, including partial sentences.",
                         )
                     except Exception:
                         raise
@@ -331,21 +359,50 @@ async def webrtc_offer(request: Request):
                 elapsed = time.time() - start_time
                 print(f"[TRANSCRIPTION TIME] {elapsed:.2f}s")
 
-                # Get transcribed text
+                # Get transcribed text and handle partial transcriptions
                 text = getattr(transcription_resp, "text", "").strip()
                 
                 if text:
                     print(f"[TRANSCRIBED] '{text}'")
-                    session_data["transcriptions"].append(text)
-
-                    # Send raw transcription to UI immediately (no AI processing)
-                    for dc in session_data["data_channels"]:
-                        if dc.readyState == "open":
-                            try:
-                                dc.send(text)  # Send ONLY the raw transcribed text
-                                print(f"[✓ SENT TO UI] '{text}'")
-                            except Exception as send_err:
-                                print(f"[ERROR] Failed to send to UI: {send_err}")
+                    
+                    # Clean up the text for better readability
+                    text = text.replace("...", "").replace("…", "").strip()
+                    
+                    # Smart text deduplication
+                    should_send = True
+                    if session_data["transcriptions"]:
+                        last_text = session_data["transcriptions"][-1].lower()
+                        current_text = text.lower()
+                        
+                        # Check if current text is contained within the last text
+                        if current_text in last_text:
+                            should_send = False
+                        # Check if current text contains last text but adds more content
+                        elif last_text in current_text:
+                            session_data["transcriptions"][-1] = text  # Replace with longer version
+                        # Check for high similarity but allow small differences
+                        elif len(current_text.split()) > 2 and current_text != last_text:
+                            should_send = True
+                    
+                    if should_send:
+                        session_data["transcriptions"].append(text)
+                        
+                        # Send transcription to UI immediately
+                        for dc in session_data["data_channels"]:
+                            if dc.readyState == "open":
+                                try:
+                                    # Send with enhanced metadata
+                                    message = {
+                                        "type": "transcription",
+                                        "text": text,
+                                        "isPartial": not initial_detection["completed"],
+                                        "timestamp": time.time(),
+                                        "confidence": getattr(transcription_resp, "confidence", 1.0)
+                                    }
+                                    dc.send(json.dumps(message))
+                                    print(f"[✓ SENT TO UI] '{text}'")
+                                except Exception as send_err:
+                                    print(f"[ERROR] Failed to send to UI: {send_err}")
                 else:
                     print("[NO TEXT] Empty transcription result")
 
@@ -404,20 +461,60 @@ async def webrtc_offer(request: Request):
 
                         total_samples = sum(len(b) for b in buffer)
                         
-                        if total_samples >= MAX_SAMPLES and not processing_lock["is_processing"]:
+                        # Determine current chunk size based on initial detection
+                        current_max_samples = INITIAL_MAX_SAMPLES if not initial_detection["completed"] else MAX_SAMPLES
+                        
+                        if total_samples >= current_max_samples and not processing_lock["is_processing"]:
                             processing_lock["is_processing"] = True
                             duration = total_samples / TARGET_SAMPLE_RATE
                             print(f"\n[BUFFER FULL] Processing {duration:.2f}s of audio")
-                            print(f"[LOCK] Processing lock acquired")
                             
+                            # Concatenate current buffer
                             chunk = np.concatenate(buffer)
+                            
+                            # Keep overlap from previous chunk if speech was detected
+                            if last_chunk_had_speech and len(secondary_buffer) > 0:
+                                overlap_audio = np.concatenate(secondary_buffer)[-OVERLAP_SAMPLES:]
+                                chunk = np.concatenate([overlap_audio, chunk])
+                            
+                            # Update secondary buffer for next overlap
+                            secondary_buffer = buffer.copy()
                             buffer.clear()
-
-                            # Trim to exact size
-                            chunk = chunk[:MAX_SAMPLES]
-
-                            # Process in background
-                            asyncio.create_task(transcribe_audio(chunk, session_data))
+                            
+                            # Trim to exact size while keeping overlap
+                            if len(chunk) > current_max_samples:
+                                chunk = chunk[-current_max_samples:]
+                            
+                            # Quick voice activity check
+                            has_voice = detect_voice_activity(chunk, TARGET_SAMPLE_RATE, 
+                                                           threshold=0.002 if not initial_detection["completed"] else 0.003)
+                            
+                            if has_voice or last_chunk_had_speech:  # Process if current or previous chunk had speech
+                                # Handle initial detection
+                                if not initial_detection["completed"] and has_voice:
+                                    print("[INITIAL DETECTION] Voice detected!")
+                                    initial_detection["completed"] = True
+                                    # Send immediate feedback to UI
+                                    for dc in session_data["data_channels"]:
+                                        if dc.readyState == "open":
+                                            try:
+                                                dc.send("Voice detected - Starting transcription...")
+                                            except Exception:
+                                                pass
+                                
+                                # Process chunk in background
+                                asyncio.create_task(transcribe_audio(chunk, session_data))
+                                last_chunk_had_speech = True
+                                last_voice_activity = time.time()
+                            else:
+                                last_chunk_had_speech = False
+                                # Update silence duration
+                                current_time = time.time()
+                                continuous_silence_duration = current_time - last_voice_activity
+                                if continuous_silence_duration > 1.0:  # Reset after 1 second of silence
+                                    secondary_buffer.clear()  # Clear overlap buffer during long silence
+                            
+                            processing_lock["is_processing"] = False
 
                     except asyncio.TimeoutError:
                         print("[TIMEOUT] No audio frame (10s timeout)")

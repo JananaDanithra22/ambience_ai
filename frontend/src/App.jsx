@@ -25,9 +25,21 @@ function App() {
     setMedicalReport(null);
     setIsPaused(false);
     try {
-  const res = await fetch("http://localhost:8000/api/session")
-  if (!res.ok) throw new Error("Failed to create session");
-  const data = await res.json();
+      console.log("Attempting to connect to backend...");
+      const res = await fetch("http://localhost:8000/api/session", {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      console.log("Backend response status:", res.status);
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error("Backend error:", errorText);
+        throw new Error(`Failed to create session: ${res.status} ${errorText}`);
+      }
+      const data = await res.json();
+      console.log("Session data received:", data);
       if (!data?.session) throw new Error("Invalid session data");
       setSession(data.session);
       console.log("Session:", data.session);
