@@ -5,6 +5,9 @@ function App() {
   const [pc, setPc] = useState(null);
   const [channel, setChannel] = useState(null);
   const [liveTranscript, setLiveTranscript] = useState('');
+  const [patientName, setPatientName] = useState('');
+  const [patientDOB, setPatientDOB] = useState('');
+  const [patientID, setPatientID] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -25,7 +28,16 @@ function App() {
     setMedicalReport(null);
     setIsPaused(false);
     try {
-      const res = await fetch("http://localhost:8000/api/session");
+      // Recommend entering patient name; allow continuation if user confirms
+      if (!patientName?.trim()) {
+        const ok = confirm('Patient name is empty. Continue without patient metadata?');
+        if (!ok) {
+          setIsConnecting(false);
+          return;
+        }
+      }
+
+      const res = await fetch("/api/session");
       if (!res.ok) throw new Error("Failed to create session");
       const data = await res.json();
       if (!data?.session) throw new Error("Invalid session data");
@@ -68,7 +80,7 @@ function App() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const answerRes = await fetch("http://localhost:8000/api/webrtc/offer", {
+  const answerRes = await fetch("/api/webrtc/offer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
@@ -127,7 +139,7 @@ function App() {
 
       console.log("Processing medical report...");
       
-      const response = await fetch("http://localhost:8000/api/process-consultation", {
+  const response = await fetch("/api/process-consultation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -311,6 +323,33 @@ function App() {
         </div>
         
         <div style={{ padding: '24px', flex: 1 }}>
+          {/* Clinician inputs: Patient metadata (optional but recommended) */}
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ display: 'block', fontSize: '13px', marginBottom: '6px', color: '#f8fafc' }}>Patient Name</label>
+            <input
+              value={patientName}
+              onChange={(e) => setPatientName(e.target.value)}
+              placeholder="e.g. John Doe"
+              style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)', marginBottom: '8px' }}
+            />
+
+            <label style={{ display: 'block', fontSize: '13px', marginBottom: '6px', color: '#f8fafc' }}>DOB</label>
+            <input
+              value={patientDOB}
+              onChange={(e) => setPatientDOB(e.target.value)}
+              placeholder="YYYY-MM-DD"
+              style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)', marginBottom: '8px' }}
+            />
+
+            <label style={{ display: 'block', fontSize: '13px', marginBottom: '6px', color: '#f8fafc' }}>Patient ID</label>
+            <input
+              value={patientID}
+              onChange={(e) => setPatientID(e.target.value)}
+              placeholder="Optional patient identifier"
+              style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}
+            />
+          </div>
+
           <button
             onClick={session ? handleEndConsultation : handleStartConsultation}
             disabled={isConnecting || isProcessing}
