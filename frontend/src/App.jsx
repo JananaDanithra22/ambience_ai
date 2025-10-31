@@ -5,15 +5,23 @@ function App() {
   const [pc, setPc] = useState(null);
   const [channel, setChannel] = useState(null);
   const [liveTranscript, setLiveTranscript] = useState('');
+  const [recognitionLang, setRecognitionLang] = useState('en-US');
   const [patientName, setPatientName] = useState('');
   const [patientDOB, setPatientDOB] = useState('');
   const [patientID, setPatientID] = useState('');
+  const [doctorName, setDoctorName] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [medicalReport, setMedicalReport] = useState(null);
+  const [audioWavUrl, setAudioWavUrl] = useState(null);
   const transcriptEndRef = useRef(null);
   const audioStreamRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const recorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const audioWavRef = useRef(null);
+  const [interimText, setInterimText] = useState('');
 
   const scrollToBottom = () => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -24,8 +32,11 @@ function App() {
   }, [liveTranscript]);
 
   const handleStartConsultation = async () => {
+    // Simplified: do local-only recording + transcription. No backend/WebRTC.
     setIsConnecting(true);
     setMedicalReport(null);
+    // clear any previous audio
+    if (audioWavUrl) { URL.revokeObjectURL(audioWavUrl); setAudioWavUrl(null); audioWavRef.current = null; }
     setIsPaused(false);
     try {
       // Recommend entering patient name; allow continuation if user confirms
@@ -37,66 +48,38 @@ function App() {
         }
       }
 
-      const res = await fetch("/api/session");
-      if (!res.ok) throw new Error("Failed to create session");
-      const data = await res.json();
-      if (!data?.session) throw new Error("Invalid session data");
-      setSession(data.session);
-      console.log("Session:", data.session);
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioStreamRef.current = stream;
-      console.log("Microphone stream ready");
-
-      const pc = new RTCPeerConnection();
-      setPc(pc);
-
-      stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
-      console.log("Audio track added to PeerConnection");
-
-      const dc = pc.createDataChannel("consultation");
-      setChannel(dc);
-
-      dc.onopen = () => {
-        console.log("Data channel opened");
-        setLiveTranscript('Start Speaking...\n\n');
-      };
-
-      dc.onmessage = (e) => {
-        console.log("Received:", e.data);
-        const text = e.data;
-        let content = text.replace('', '').replace('Summary update:\n', '');
-        setLiveTranscript(prev => prev + content + ' ');
-      };
-
-      dc.onclose = () => {
-        console.log("Data channel closed");
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        console.log("ICE state:", pc.iceConnectionState);
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-  const answerRes = await fetch("/api/webrtc/offer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          channelCount: 1,
+          sampleRate: 48000
+        }
       });
+      audioStreamRef.current = stream;
+      console.log('Microphone stream ready (local only)');
 
-      if (!answerRes.ok) throw new Error("Failed to get answer");
-      const answer = await answerRes.json();
+      // Mark a lightweight local session so UI behaves the same
+      setSession({ id: 'local' });
+      setLiveTranscript('Start Speaking...\n\n');
 
-      await pc.setRemoteDescription(answer);
-      console.log("WebRTC connected");
-      
+      // Start local transcription automatically
+  startLocalTranscription();
+
+      // Start audio recording automatically so full conversation (doctor + patient) is captured
+      try {
+        startAudioRecording();
+      } catch (err) {
+        console.warn('Auto-start audio recording failed:', err);
+      }
+
       setIsConnecting(false);
     } catch (e) {
-      console.error("Error:", e);
-      alert(e.message);
-      handleEndConsultation();
+      console.error('Error starting local consultation:', e);
+      alert(e.message || 'Failed to start local consultation');
+      // cleanup
+      try { audioStreamRef.current?.getTracks().forEach(t => t.stop()); } catch (err) { console.warn(err); }
+      audioStreamRef.current = null;
       setIsConnecting(false);
     }
   };
@@ -112,66 +95,290 @@ function App() {
     }
   };
 
-  const handleEndConsultation = async () => {
-    if (!session || !liveTranscript.trim()) {
-      if (channel) channel.close();
-      if (pc) pc.close();
-      if (audioStreamRef.current) {
-        audioStreamRef.current.getTracks().forEach(track => track.stop());
-      }
-      setChannel(null);
-      setPc(null);
-      setSession(null);
-      setLiveTranscript('');
-      setIsPaused(false);
-      audioStreamRef.current = null;
+  const handleEndConsultation = () => {
+    // Build a simple medical report from the transcript and patient metadata
+    try {
+      const transcript = (liveTranscript || '').trim();
+  const header = `Patient Name: ${patientName || 'Not provided'}\nDate: ${new Date().toLocaleDateString()}\nDoctor: ${doctorName || 'Not provided'}\nPatient ID: ${patientID || 'Not provided'}\n\n`;
+
+      // helper to find a short sentence containing a keyword
+      const findSentence = (keywords) => {
+        if (!transcript) return null;
+        const sentences = transcript.split(/[.?!]\s+/);
+        for (const s of sentences) {
+          for (const k of keywords) {
+            if (s.toLowerCase().includes(k)) return s.trim();
+          }
+        }
+        return null;
+      };
+
+      const chief = findSentence(['chief complaint', 'complaint', 'presenting']);
+      const symptoms = findSentence(['symptom', 'symptoms', 'pain', 'fever', 'cough', 'headache']);
+      const duration = findSentence(['duration', 'for', 'since']);
+      const diagnosis = findSentence(['diagnos']);
+      const meds = findSentence(['medicat', 'tablet', 'dose', 'prescrib']);
+      const advice = findSentence(['advice', 'recommend', 'take', 'rest', 'follow up']);
+      const follow = findSentence(['follow up', 'follow-up', 'review']);
+
+      const reportLines = [];
+      reportLines.push(header);
+      reportLines.push(`Chief Complaint: ${chief ? chief : 'Not discussed'}`);
+      reportLines.push('');
+      reportLines.push(`Symptoms:\n- ${symptoms ? symptoms : 'Not mentioned'}`);
+      reportLines.push('');
+      reportLines.push(`Duration of Symptoms: ${duration ? duration : 'Not discussed'}`);
+      reportLines.push('');
+      reportLines.push(`Diagnosis: ${diagnosis ? diagnosis : 'Not discussed'}`);
+      reportLines.push('');
+      reportLines.push(`Medications / Treatment Given:\n- ${meds ? meds : 'Not mentioned'}`);
+      reportLines.push('');
+      reportLines.push(`Doctor's Advice:\n${advice ? advice : 'Not discussed'}`);
+      reportLines.push('');
+      reportLines.push(`Follow-up Date: ${follow ? follow : 'Not specified'}`);
+      reportLines.push('\nConsultation Transcript:\n');
+      reportLines.push(transcript || 'No transcript available');
+
+      const report = reportLines.join('\n');
+      setMedicalReport(report);
+    } catch (err) {
+      console.warn('Failed to build medical report:', err);
+      setMedicalReport(liveTranscript || '');
+    }
+
+    try { stopLocalTranscription(); } catch (err) { console.warn(err); }
+    try { stopAudioRecording(); } catch (err) { console.warn(err); }
+    if (audioStreamRef.current) {
+      try { audioStreamRef.current.getTracks().forEach(t => t.stop()); } catch (err) { console.warn(err); }
+    }
+    setChannel(null);
+    setPc(null);
+    setSession(null);
+    setIsProcessing(false);
+    setIsPaused(false);
+    audioStreamRef.current = null;
+    console.log('Consultation ended');
+  };
+
+  const startLocalTranscription = () => {
+    if (!window) return;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('Web Speech API not supported in this browser. Use Chrome or Edge for local transcription.');
       return;
     }
 
-    setIsProcessing(true);
-
     try {
-      if (channel) channel.close();
-      if (pc) pc.close();
-      if (audioStreamRef.current) {
-        audioStreamRef.current.getTracks().forEach(track => track.stop());
-      }
+      const recognition = new SpeechRecognition();
+      recognition.lang = recognitionLang || 'en-US';
+      // ask for a few alternatives to improve chance of correct text
+  try { recognition.maxAlternatives = 3; } catch (err) { console.warn(err); }
+      recognition.interimResults = true;
+      recognition.continuous = true;
 
-      console.log("Processing medical report...");
-      
-  const response = await fetch("/api/process-consultation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: session.id,
-          transcript: liveTranscript
-        }),
-      });
+      let interim = '';
 
-      if (!response.ok) throw new Error("Failed to process consultation");
-      
-      const data = await response.json();
-      console.log("Medical report received:", data);
-      
-      setMedicalReport(data.report);
-      
+      recognition.onresult = (event) => {
+        let finalTranscript = '';
+        interim = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            finalTranscript += res[0].transcript;
+          } else {
+            interim += res[0].transcript;
+          }
+        }
+
+        // Post-process final transcript for basic punctuation/casing heuristics
+        if (finalTranscript) {
+          const cleaned = normalizeTranscript(finalTranscript);
+          setLiveTranscript(prev => prev + (prev ? ' ' : '') + cleaned);
+          setInterimText('');
+        } else {
+          // keep interim separately so UI shows it inline without creating separate lines
+          setInterimText(interim);
+        }
+      };
+
+      recognition.onerror = (e) => {
+        console.error('Recognition error', e);
+      };
+      recognition.onend = () => {
+        recognitionRef.current = null;
+        // If session still active, restart recognition to keep continuous transcription
+        try {
+          if (session) {
+            console.log('Recognition ended, restarting...');
+            startLocalTranscription();
+          }
+        } catch (err) {
+          console.warn('Failed to restart recognition', err);
+        }
+      };
+
+      recognition.start();
+  recognitionRef.current = recognition;
     } catch (e) {
-      console.error("Error processing consultation:", e);
-      alert("Failed to process consultation: " + e.message);
-    } finally {
-      setChannel(null);
-      setPc(null);
-      setSession(null);
-      setIsProcessing(false);
-      setIsPaused(false);
-      audioStreamRef.current = null;
-      console.log("Consultation ended");
+      console.error('startLocalTranscription error', e);
+      alert('Failed to start local transcription: ' + e.message);
     }
   };
+
+  // Basic cleanup: trim, collapse spaces, capitalize sentences and ensure punctuation.
+  const normalizeTranscript = (text) => {
+    if (!text) return '';
+    let t = text.trim();
+    // collapse multiple spaces
+    t = t.replace(/\s+/g, ' ');
+    // add punctuation at end if missing
+    if (!/[.?!]$/.test(t)) t = t.charAt(0).toUpperCase() + t.slice(1) + '.';
+    else t = t.charAt(0).toUpperCase() + t.slice(1);
+    return t;
+  };
+
+  // Encode an AudioBuffer to a 16-bit PCM WAV Blob
+  const encodeWAV = (audioBuffer) => {
+    const numChannels = Math.min(2, audioBuffer.numberOfChannels || 1);
+    const sampleRate = audioBuffer.sampleRate || 48000;
+    const format = 1; // PCM
+
+    // interleave channels
+    let interleaved;
+    if (numChannels === 1) {
+      const ch0 = audioBuffer.getChannelData(0);
+      interleaved = ch0;
+    } else {
+      const ch0 = audioBuffer.getChannelData(0);
+      const ch1 = audioBuffer.getChannelData(1);
+      interleaved = new Float32Array(ch0.length + ch1.length);
+      let idx = 0;
+      for (let i = 0; i < ch0.length; i++) {
+        interleaved[idx++] = ch0[i];
+        interleaved[idx++] = ch1[i];
+      }
+    }
+
+    // convert float audio data to 16-bit PCM
+    const buffer = new ArrayBuffer(44 + interleaved.length * 2);
+    const view = new DataView(buffer);
+
+    /* RIFF identifier */ writeString(view, 0, 'RIFF');
+    /* file length */ view.setUint32(4, 36 + interleaved.length * 2, true);
+    /* RIFF type */ writeString(view, 8, 'WAVE');
+    /* format chunk identifier */ writeString(view, 12, 'fmt ');
+    /* format chunk length */ view.setUint32(16, 16, true);
+    /* sample format (raw) */ view.setUint16(20, format, true);
+    /* channel count */ view.setUint16(22, numChannels, true);
+    /* sample rate */ view.setUint32(24, sampleRate, true);
+    /* byte rate (sample rate * block align) */ view.setUint32(28, sampleRate * numChannels * 2, true);
+    /* block align (channel count * bytes per sample) */ view.setUint16(32, numChannels * 2, true);
+    /* bits per sample */ view.setUint16(34, 16, true);
+    /* data chunk identifier */ writeString(view, 36, 'data');
+    /* data chunk length */ view.setUint32(40, interleaved.length * 2, true);
+
+    // write PCM samples
+    let offset = 44;
+    for (let i = 0; i < interleaved.length; i++, offset += 2) {
+      let s = Math.max(-1, Math.min(1, interleaved[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+  };
+
+  const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+
+  const stopLocalTranscription = () => {
+    try {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    } catch (e) {
+      console.error('stopLocalTranscription error', e);
+    } finally {
+      // transcription stopped
+    }
+  };
+
+  const startAudioRecording = () => {
+    if (!audioStreamRef.current) {
+      alert('No microphone stream available. Start the consultation first.');
+      return;
+    }
+
+    try {
+      audioChunksRef.current = [];
+      const options = { mimeType: 'audio/webm' };
+      const recorder = new MediaRecorder(audioStreamRef.current, options);
+      recorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        // audioChunksRef.current contains the recorded Blob parts
+        (async () => {
+          try {
+            const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+            console.log('Recorded audio blob size:', blob.size);
+
+            // Try to decode the webm/opus data and export as WAV for higher compatibility/accuracy
+            if (window.AudioContext || window.webkitAudioContext) {
+              const AudioCtx = window.AudioContext || window.webkitAudioContext;
+              const ac = new AudioCtx();
+              const arrayBuffer = await blob.arrayBuffer();
+              const audioBuffer = await ac.decodeAudioData(arrayBuffer);
+
+              // encode WAV (16-bit PCM)
+              const wavBlob = encodeWAV(audioBuffer);
+              audioWavRef.current = wavBlob;
+              if (audioWavUrl) {
+                URL.revokeObjectURL(audioWavUrl);
+              }
+              const url = URL.createObjectURL(wavBlob);
+              setAudioWavUrl(url);
+              console.log('WAV blob created, size:', wavBlob.size);
+            } else {
+              console.warn('AudioContext not available; cannot convert to WAV');
+            }
+          } catch (err) {
+            console.warn('Failed to convert recorded audio to WAV:', err);
+          }
+        })();
+      };
+
+      recorder.start();
+    } catch (e) {
+      console.error('startAudioRecording error', e);
+      alert('Failed to start audio recording: ' + e.message);
+    }
+  };
+
+  const stopAudioRecording = () => {
+    try {
+      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+        recorderRef.current.stop();
+      }
+    } catch (e) {
+      console.error('stopAudioRecording error', e);
+    }
+  };
+
+  
+
+  
 
   const clearTranscript = () => {
     setLiveTranscript('');
     setMedicalReport(null);
+    if (audioWavUrl) { URL.revokeObjectURL(audioWavUrl); setAudioWavUrl(null); audioWavRef.current = null; }
   };
 
   const downloadTextReport = () => {
@@ -348,6 +555,23 @@ function App() {
               placeholder="Optional patient identifier"
               style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}
             />
+            
+            <label style={{ display: 'block', fontSize: '13px', marginBottom: '6px', color: '#f8fafc', marginTop: '12px' }}>Doctor Name</label>
+            <input
+              value={doctorName}
+              onChange={(e) => setDoctorName(e.target.value)}
+              placeholder="e.g. Dr. Jane Smith"
+              style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}
+            />
+            <div style={{ marginTop: '10px' }}>
+              <label style={{ display: 'block', fontSize: '13px', marginBottom: '6px', color: '#f8fafc' }}>Transcription Language</label>
+              <select value={recognitionLang} onChange={(e) => setRecognitionLang(e.target.value)} style={{ width: '100%', padding: '8px', borderRadius: '6px' }}>
+                <option value="en-US">English (US)</option>
+                <option value="en-GB">English (UK)</option>
+                <option value="es-ES">Spanish (Spain)</option>
+                <option value="fr-FR">French</option>
+              </select>
+            </div>
           </div>
 
           <button
@@ -410,6 +634,8 @@ function App() {
             </button>
           )}
 
+          {/* manual transcription/recording controls removed per request - recording & transcription run automatically */}
+
           {(liveTranscript || medicalReport) && !session && (
             <button
               onClick={clearTranscript}
@@ -469,6 +695,48 @@ function App() {
               >
                 Download PDF
               </button>
+
+              {audioWavUrl && (
+                <button
+                  onClick={() => {
+                    try {
+                      const a = document.createElement('a');
+                      a.href = audioWavUrl;
+                      a.download = `consultation-audio-${new Date().toISOString().split('T')[0]}.wav`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                    } catch (err) {
+                      console.warn('Failed to download audio', err);
+                    }
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '12px 18px',
+                    borderRadius: '10px',
+                    fontWeight: '600',
+                    fontSize: '14px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    backgroundColor: '#2563eb',
+                    color: 'white',
+                    transition: 'all 0.2s',
+                    boxShadow: '0 2px 8px rgba(37, 99, 235, 0.3)'
+                  }}
+                  onMouseOver={(e) => {
+                    e.target.style.backgroundColor = '#1e40af';
+                    e.target.style.transform = 'translateY(-1px)';
+                    e.target.style.boxShadow = '0 4px 12px rgba(37, 99, 235, 0.4)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.target.style.backgroundColor = '#2563eb';
+                    e.target.style.transform = 'translateY(0)';
+                    e.target.style.boxShadow = '0 2px 8px rgba(37, 99, 235, 0.3)';
+                  }}
+                >
+                  Download Audio
+                </button>
+              )}
 
               <button
                 onClick={handlePrint}
@@ -662,7 +930,7 @@ function App() {
                 fontFamily: '"Poppins", "Segoe UI", sans-serif',
                 letterSpacing: '0.01em'
               }}>
-                {liveTranscript}
+                {liveTranscript}{interimText ? interimText : ''}
                 {session && !isPaused && (
                   <span style={{
                     display: 'inline-block',
